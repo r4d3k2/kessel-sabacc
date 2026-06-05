@@ -364,7 +364,11 @@ test('applyAiTurn: dobrá ruka → AI stojí, log obsahuje "stojí"', () => {
 
 // ── Speciální karty: resolveHand ────────────────────────────────────────────
 
-const die = (n: number) => () => n // deterministická „kostka"
+/** Deterministická kostka vracející postupně dané hodnoty. */
+const seqDie = (...values: number[]) => {
+  let i = 0
+  return () => values[i++]
+}
 
 test('resolveHand: Sylop se vyrovná druhé kartě → rozdíl 0', () => {
   const rh = resolveHand({ sand: sylop('sand'), blood: card('blood', 4) })
@@ -380,27 +384,54 @@ test('resolveHand: dva Sylopy = Pure Sabacc (ne vyrovnání)', () => {
   assert.equal(rh.sylopMatched, null)
 })
 
-test('resolveHand: Imposter hodí kostkou jednou, hodnota = hod', () => {
-  const rh = resolveHand({ sand: imposter('sand'), blood: card('blood', 2) }, die(5))
-  assert.equal(rh.sand, 5)
-  assert.equal(rh.value, 3) // |5-2|
-  assert.deepEqual(rh.imposterRolls, [{ family: 'sand', roll: 5 }])
+test('resolveHand: Imposter hodí 2 kostky a vybere lepší (nižší rozdíl)', () => {
+  // blood 2; kostky [6,3] → vybráno 3 (|3-2|=1 < |6-2|=4)
+  const rh = resolveHand({ sand: imposter('sand'), blood: card('blood', 2) }, seqDie(6, 3))
+  assert.equal(rh.sand, 3)
+  assert.equal(rh.value, 1)
+  assert.deepEqual(rh.imposterRolls, [{ family: 'sand', rolls: [6, 3], chosen: 3 }])
 })
 
-test('resolveHand: Sylop + Imposter → nejdřív Imposter, pak Sylop na jeho hodnotu', () => {
-  const rh = resolveHand({ sand: sylop('sand'), blood: imposter('blood') }, die(6))
-  assert.equal(rh.blood, 6)
-  assert.equal(rh.sand, 6) // Sylop se vyrovnal hodu Imposteru
+test('resolveHand: Imposter vybere hodnotu dělající Sabacc', () => {
+  // blood 4; kostky [4,1] → vybráno 4 → Sabacc 4/4 (lepší než |1-4|=3)
+  const rh = resolveHand({ sand: imposter('sand'), blood: card('blood', 4) }, seqDie(4, 1))
   assert.equal(rh.value, 0)
-  assert.deepEqual(rh.sylopMatched, { family: 'sand', value: 6 })
+  assert.equal(rh.imposterRolls[0].chosen, 4)
 })
 
-test('resolveHand: dva Imposteři → dva hody, rozdíl z nich', () => {
-  let calls = 0
-  const seq = () => (calls++ === 0 ? 4 : 1)
-  const rh = resolveHand({ sand: imposter('sand'), blood: imposter('blood') }, seq)
-  assert.equal(rh.value, 3) // |4-1|
+test('resolveHand: Imposter Sabacc = plnohodnotný Sabacc téže hodnoty', () => {
+  const imp = resolveHand({ sand: imposter('sand'), blood: card('blood', 4) }, seqDie(4, 1)) // Sabacc 4/4
+  const num = resolveHand({ sand: card('sand', 4), blood: card('blood', 4) }) // běžný 4/4
+  assert.equal(compareHandScore(handScore(imp), handScore(num)), 0)
+})
+
+test('resolveHand: Sylop + Imposter → Imposter (2 kostky) první, pak Sylop na vybranou', () => {
+  // sand Sylop, blood Imposter kostky [5,2]; Sylop se vyrovná → vybere nižší 2 (Sabacc 2/2 < 5/5)
+  const rh = resolveHand({ sand: sylop('sand'), blood: imposter('blood') }, seqDie(5, 2))
+  assert.equal(rh.blood, 2)
+  assert.equal(rh.sand, 2)
+  assert.equal(rh.value, 0)
+  assert.deepEqual(rh.imposterRolls, [{ family: 'blood', rolls: [5, 2], chosen: 2 }])
+  assert.deepEqual(rh.sylopMatched, { family: 'sand', value: 2 })
+})
+
+test('resolveHand: dva Imposteři → 2× dvě kostky, nejlepší kombinace', () => {
+  // sand kostky [6,3], blood kostky [4,3] → nejlepší kombinace 3/3 (Sabacc)
+  const rh = resolveHand({ sand: imposter('sand'), blood: imposter('blood') }, seqDie(6, 3, 4, 3))
+  assert.equal(rh.value, 0)
+  assert.equal(rh.sand, 3)
+  assert.equal(rh.blood, 3)
   assert.equal(rh.imposterRolls.length, 2)
+  assert.deepEqual(rh.imposterRolls[0], { family: 'sand', rolls: [6, 3], chosen: 3 })
+  assert.deepEqual(rh.imposterRolls[1], { family: 'blood', rolls: [4, 3], chosen: 3 })
+})
+
+test('resolveHand: dva Imposteři bez možného Sabaccu → nejmenší rozdíl', () => {
+  // sand [6,5], blood [1,2] → nejlepší |5-2|=3 (žádná shoda nemožná)
+  const rh = resolveHand({ sand: imposter('sand'), blood: imposter('blood') }, seqDie(6, 5, 1, 2))
+  assert.equal(rh.value, 3)
+  assert.equal(rh.sand, 5)
+  assert.equal(rh.blood, 2)
 })
 
 test('previewHandValue: Imposter → neznámá hodnota; Sylop → Sabacc; dva Sylopy → Pure', () => {

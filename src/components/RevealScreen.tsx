@@ -58,7 +58,7 @@ export function RevealScreen({ state, autoAdvancing = false, onNext }: Props) {
                 {/* Detaily vyřešení speciálních karet */}
                 {r.resolved.imposterRolls.map((ir) => (
                   <p key={ir.family} className="text-xs text-slate-400 flex items-center justify-end gap-1">
-                    <Dices size={12} /> Imposter ({ir.family === 'sand' ? 'Sand' : 'Blood'}) → {ir.roll}
+                    <Dices size={12} /> Imposter ({ir.family === 'sand' ? 'Sand' : 'Blood'}): kostky {ir.rolls[0]} a {ir.rolls[1]} → vybráno {ir.chosen}
                   </p>
                 ))}
                 {r.resolved.sylopMatched && (

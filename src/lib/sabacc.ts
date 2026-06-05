@@ -210,6 +210,15 @@ export function rollDie(rng: () => number = Math.random): number {
   return 1 + Math.floor(rng() * DIE_SIDES)
 }
 
+/** Hod a výběr pro jeden Imposter: dvě padlé kostky + automaticky vybraná hodnota. */
+export interface ImposterRoll {
+  family: Family
+  /** Co padlo na dvou kostkách (každá 1–6). */
+  rolls: [number, number]
+  /** Hodnota automaticky vybraná z obou kostek (vede k nejlepší ruce). */
+  chosen: number
+}
+
 /** Vyřešená ruka po revealu (Imposter hozen, Sylop vyrovnán). */
 export interface ResolvedHand {
   /** Výsledná hodnota ruky (nižší lepší); u Pure Sabacc 0. */
@@ -219,62 +228,71 @@ export interface ResolvedHand {
   /** Vyřešené hodnoty karet (null jen u Pure Sabacc). */
   sand: number | null
   blood: number | null
-  /** Co padlo na kostce u Imposterů. */
-  imposterRolls: { family: Family; roll: number }[]
+  /** Hody a výběry u Imposterů. */
+  imposterRolls: ImposterRoll[]
   /** Na jakou hodnotu se vyrovnal Sylop (pokud nějaký jediný v ruce byl). */
   sylopMatched: { family: Family; value: number } | null
 }
 
 /**
- * Vyhodnotí ruku ve fázi reveal v přesném pořadí:
- *  1) Imposter — hodí kostkou (1–6), tím se hodnota pevně určí pro toto kolo;
- *  2) Sylop — vyrovná se hodnotě druhé (už vyřešené) karty;
- *  3) dva Sylopy — Pure Sabacc (hodnota 0, vyhrává kolo);
+ * Vyhodnotí ruku ve fázi reveal:
+ *  1) Imposter — hodí DVĚ kostky (1–6) a automaticky vybere tu z hodnot, která
+ *     vede k nejlepší ruce dle pořadí síly ruky (handScore). Pro každý Imposter
+ *     zvlášť (vlastní dva hody). U dvou Imposterů zváží všechny kombinace.
+ *  2) Sylop — vyrovná se hodnotě druhé (už vyřešené) karty.
+ *  3) dva Sylopy — Pure Sabacc.
  *  4) jinak — absolutní rozdíl obou vyřešených hodnot.
  * Kostka se injektuje parametrem `roll`, takže je to deterministicky testovatelné.
+ * Pořadí hodů: nejdřív dvě kostky Sand Imposteru, pak dvě kostky Blood Imposteru.
  */
 export function resolveHand(hand: Hand, roll: () => number = () => rollDie()): ResolvedHand {
   const sandIsSylop = hand.sand.kind === 'sylop'
   const bloodIsSylop = hand.blood.kind === 'sylop'
 
-  // 3) Dva Sylopy → Pure Sabacc (Sylop se nikdy nevyrovnává sám sobě).
+  // Dva Sylopy → Pure Sabacc (Sylop se nikdy nevyrovnává sám sobě).
   if (sandIsSylop && bloodIsSylop) {
     return { value: 0, isPureSabacc: true, sand: null, blood: null, imposterRolls: [], sylopMatched: null }
   }
 
-  const imposterRolls: { family: Family; roll: number }[] = []
+  // Pro každý Imposter hoď dvě kostky (nezávisle, Sand pak Blood).
+  const sandDice: [number, number] | null = hand.sand.kind === 'imposter' ? [roll(), roll()] : null
+  const bloodDice: [number, number] | null = hand.blood.kind === 'imposter' ? [roll(), roll()] : null
 
-  // 1) Vyřeš Imposter(y) a číselné karty.
-  let sand: number | null = null
-  let blood: number | null = null
-  if (hand.sand.kind === 'imposter') {
-    sand = roll()
-    imposterRolls.push({ family: 'sand', roll: sand })
-  } else if (hand.sand.kind === 'number') {
-    sand = hand.sand.value
-  }
-  if (hand.blood.kind === 'imposter') {
-    blood = roll()
-    imposterRolls.push({ family: 'blood', roll: blood })
-  } else if (hand.blood.kind === 'number') {
-    blood = hand.blood.value
-  }
+  // Kandidátní hodnoty: Imposter → jeho dvě kostky, číslo → jeho hodnota,
+  // Sylop → null (vyrovná se druhé kartě).
+  const sandCands: (number | null)[] = sandDice ?? (sandIsSylop ? [null] : [hand.sand.value])
+  const bloodCands: (number | null)[] = bloodDice ?? (bloodIsSylop ? [null] : [hand.blood.value])
 
-  // 2) Vyřeš jediný Sylop — vyrovná se druhé, už známé kartě.
+  // Vyber kombinaci kandidátů s nejlepší rukou podle existujícího pořadí síly ruky.
+  let best: { sand: number; blood: number; sandChosen: number | null; bloodChosen: number | null; score: number[] } | null = null
+  for (const sc of sandCands) {
+    for (const bc of bloodCands) {
+      let sandVal = sc
+      let bloodVal = bc
+      if (sandIsSylop) sandVal = bloodVal // Sylop se vyrovná druhé kartě
+      else if (bloodIsSylop) bloodVal = sandVal
+      const value = Math.abs(sandVal! - bloodVal!)
+      const score = handScore({ value, isPureSabacc: false, sand: sandVal, blood: bloodVal, imposterRolls: [], sylopMatched: null })
+      if (!best || compareHandScore(score, best.score) < 0) {
+        best = { sand: sandVal!, blood: bloodVal!, sandChosen: sc, bloodChosen: bc, score }
+      }
+    }
+  }
+  const b = best!
+
+  const imposterRolls: ImposterRoll[] = []
+  if (sandDice) imposterRolls.push({ family: 'sand', rolls: sandDice, chosen: b.sandChosen! })
+  if (bloodDice) imposterRolls.push({ family: 'blood', rolls: bloodDice, chosen: b.bloodChosen! })
+
   let sylopMatched: { family: Family; value: number } | null = null
-  if (sandIsSylop) {
-    sand = blood
-    sylopMatched = { family: 'sand', value: blood! }
-  } else if (bloodIsSylop) {
-    blood = sand
-    sylopMatched = { family: 'blood', value: sand! }
-  }
+  if (sandIsSylop) sylopMatched = { family: 'sand', value: b.sand }
+  else if (bloodIsSylop) sylopMatched = { family: 'blood', value: b.blood }
 
   return {
-    value: Math.abs(sand! - blood!),
+    value: Math.abs(b.sand - b.blood),
     isPureSabacc: false,
-    sand,
-    blood,
+    sand: b.sand,
+    blood: b.blood,
     imposterRolls,
     sylopMatched,
   }
