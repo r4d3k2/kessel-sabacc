@@ -51,6 +51,30 @@ export interface Hand {
   blood: Card
 }
 
+/**
+ * Shift Tokeny (F3b) — jednorázové čipové triky. Každý hráč si jich na partii
+ * vybere 3 z těchto 6. Efekty se týkají jen čipů, nikdy karet ani vyhodnocení.
+ */
+export type TokenId =
+  | 'freeDraw'
+  | 'refund'
+  | 'extraRefund'
+  | 'embezzlement'
+  | 'generalTariff'
+  | 'targetTariff'
+
+/** Všech 6 tokenů (pořadí pro výběr a náhodný los AI). */
+export const ALL_TOKENS: TokenId[] = [
+  'freeDraw',
+  'refund',
+  'extraRefund',
+  'embezzlement',
+  'generalTariff',
+  'targetTariff',
+]
+/** Kolik tokenů si každý hráč vybírá na partii. */
+export const TOKENS_PER_PLAYER = 3
+
 export interface Player {
   id: number
   name: string
@@ -66,6 +90,10 @@ export interface Player {
   eliminated: boolean
   /** Kolo, ve kterém byl vyřazen (pro přehled na konci). */
   eliminatedRound?: number
+  /** Nezahranés Shift Tokeny (jednorázové, mizí po zahrání). */
+  tokens: TokenId[]
+  /** Už zahrál token v tomto kole? (max 1 za kolo) */
+  playedTokenThisRound: boolean
 }
 
 export type Phase = 'setup' | 'turn' | 'aiTurn' | 'reveal' | 'gameover'
@@ -102,6 +130,8 @@ export interface GameConfig {
   numAi: number
   /** Startovní zásoba čipů pro každého. */
   startingChips: number
+  /** 3 tokeny vybrané lidským hráčem. */
+  humanTokens: TokenId[]
 }
 
 export interface GameState {
@@ -120,6 +150,8 @@ export interface GameState {
   currentPlayerIndex: number
   /** Karta právě tažená, čeká na rozhodnutí kterou nechat. */
   pendingDraw: Card | null
+  /** Aktivní efekt Free Draw — nejbližší tažení aktuálního hráče je zdarma. */
+  freeDrawActive: boolean
   /** Vítěz právě vyhodnoceného kola, nebo null při remíze. */
   roundWinnerId: number | null
   /** Výsledky posledního vyhodnocení (pro reveal), nebo null. */
@@ -333,6 +365,7 @@ export function createInitialState(): GameState {
     turn: 0,
     currentPlayerIndex: 0,
     pendingDraw: null,
+    freeDrawActive: false,
     roundWinnerId: null,
     roundResults: null,
     log: [],
@@ -349,19 +382,32 @@ const emptyHand = (): Hand => ({
  * Rozdá karty pro nové kolo: zamíchá oba balíčky a každému neaktivnímu
  * (nevyřazenému) hráči dá jednu Sand a jednu Blood, resetuje standing
  * a investici kola. Vyřazení hráči zůstávají beze změny.
+ *
+ * Po rozdání rukou dealer otočí jednu kartu z každého balíčku lícem nahoru na
+ * příslušnou odhazovací hromádku (úvodní odhoz Sand a Blood) — bere se z balíčku,
+ * žádné karty navíc se nevytvářejí.
  */
 function dealRound(players: Player[]): {
   players: Player[]
   decks: { sand: Card[]; blood: Card[] }
+  discards: { sand: Card[]; blood: Card[] }
 } {
   const sand = shuffle(createDeck('sand'))
   const blood = shuffle(createDeck('blood'))
   const dealt = players.map((p) =>
     p.eliminated
       ? p
-      : { ...p, hand: { sand: sand.pop()!, blood: blood.pop()! }, standing: false, invested: 0 },
+      : {
+          ...p,
+          hand: { sand: sand.pop()!, blood: blood.pop()! },
+          standing: false,
+          invested: 0,
+          playedTokenThisRound: false,
+        },
   )
-  return { players: dealt, decks: { sand, blood } }
+  // Úvodní odhoz: jedna otočená karta z každého balíčku.
+  const discards = { sand: [sand.pop()!], blood: [blood.pop()!] }
+  return { players: dealt, decks: { sand, blood }, discards }
 }
 
 function phaseForPlayer(p: Player): Phase {
@@ -381,6 +427,8 @@ export function startGame(config: GameConfig): GameState {
     chips: config.startingChips,
     invested: 0,
     eliminated: false,
+    tokens: config.humanTokens.slice(0, TOKENS_PER_PLAYER),
+    playedTokenThisRound: false,
   })
   for (let i = 0; i < numAi; i++) {
     players.push({
@@ -392,20 +440,23 @@ export function startGame(config: GameConfig): GameState {
       chips: config.startingChips,
       invested: 0,
       eliminated: false,
+      tokens: shuffle(ALL_TOKENS).slice(0, TOKENS_PER_PLAYER), // AI losuje náhodně
+      playedTokenThisRound: false,
     })
   }
 
-  const { players: dealtPlayers, decks } = dealRound(players)
+  const { players: dealtPlayers, decks, discards } = dealRound(players)
   return {
     phase: 'turn', // index 0 = člověk
     players: dealtPlayers,
     decks,
-    discards: { sand: [], blood: [] },
+    discards,
     pot: 0,
     round: 1,
     turn: 1,
     currentPlayerIndex: 0,
     pendingDraw: null,
+    freeDrawActive: false,
     roundWinnerId: null,
     roundResults: null,
     log: [],
@@ -433,10 +484,15 @@ export function canDrawFrom(state: GameState, source: DrawSource): boolean {
   }
 }
 
-/** Může aktuální hráč táhnout? (Má na to čipy.) */
+/** Cena tažení pro aktuální stav (0 při aktivním Free Draw). */
+export function drawCost(state: GameState): number {
+  return state.freeDrawActive ? 0 : DRAW_COST
+}
+
+/** Může aktuální hráč táhnout? (Má na to čipy, nebo má Free Draw.) */
 export function canAffordDraw(state: GameState): boolean {
   const p = state.players[state.currentPlayerIndex]
-  return !!p && p.chips >= DRAW_COST
+  return !!p && p.chips >= drawCost(state)
 }
 
 /**
@@ -469,14 +525,23 @@ export function drawFromSource(state: GameState, source: DrawSource): GameState 
       break
   }
 
-  // Zaplať čip do potu.
+  // Zaplať cenu tažení do potu (0 při Free Draw); Free Draw se spotřebuje.
+  const cost = drawCost(state)
   const players = state.players.map((p, i) =>
     i === state.currentPlayerIndex
-      ? { ...p, chips: p.chips - DRAW_COST, invested: p.invested + DRAW_COST }
+      ? { ...p, chips: p.chips - cost, invested: p.invested + cost }
       : p,
   )
 
-  return { ...state, decks, discards, players, pot: state.pot + DRAW_COST, pendingDraw: drawn }
+  return {
+    ...state,
+    decks,
+    discards,
+    players,
+    pot: state.pot + cost,
+    pendingDraw: drawn,
+    freeDrawActive: false,
+  }
 }
 
 /**
@@ -533,6 +598,8 @@ function firstActive(players: Player[]): number {
  * ukončí kolo a vyhodnotí ho.
  */
 function advanceTurn(state: GameState): GameState {
+  // Free Draw platí jen pro tah hráče, který ho zahrál — při přechodu zruš.
+  state = { ...state, freeDrawActive: false }
   const next = nextActiveAfter(state.players, state.currentPlayerIndex)
   if (next !== -1) {
     return { ...state, currentPlayerIndex: next, phase: phaseForPlayer(state.players[next]) }
@@ -654,18 +721,19 @@ export function nextRound(state: GameState): GameState {
     return { ...state, phase: 'gameover', gameWinnerId }
   }
 
-  const { players, decks } = dealRound(state.players)
+  const { players, decks, discards } = dealRound(state.players)
   const first = firstActive(players)
   return {
     ...state,
     players,
     decks,
-    discards: { sand: [], blood: [] },
+    discards,
     pot: 0,
     round: state.round + 1,
     turn: 1,
     currentPlayerIndex: first,
     pendingDraw: null,
+    freeDrawActive: false,
     roundWinnerId: null,
     roundResults: null,
     log: [],

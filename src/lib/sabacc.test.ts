@@ -21,8 +21,10 @@ import {
   type Player,
   type GameState,
   type Card,
+  type TokenId,
 } from './sabacc.ts'
-import { decideAiMove, decideAiKeep, applyAiTurn } from './ai.ts'
+import { decideAiMove, decideAiKeep, applyAiTurn, decideAiToken } from './ai.ts'
+import { canPlayToken, playToken } from './tokens.ts'
 
 function card(family: 'sand' | 'blood', value: number): Card {
   return { id: `${family}-${value}`, family, kind: 'number', value }
@@ -38,7 +40,14 @@ function mkPlayer(
   id: number,
   sandV: number,
   bloodV: number,
-  opts: { chips?: number; invested?: number; isAi?: boolean; eliminated?: boolean } = {},
+  opts: {
+    chips?: number
+    invested?: number
+    isAi?: boolean
+    eliminated?: boolean
+    tokens?: TokenId[]
+    playedTokenThisRound?: boolean
+  } = {},
 ): Player {
   return {
     id,
@@ -49,6 +58,8 @@ function mkPlayer(
     chips: opts.chips ?? 6,
     invested: opts.invested ?? 0,
     eliminated: opts.eliminated ?? false,
+    tokens: opts.tokens ?? [],
+    playedTokenThisRound: opts.playedTokenThisRound ?? false,
   }
 }
 
@@ -101,7 +112,7 @@ test('evaluateRound: sólo nejnižší vyhrává; remíza = null', () => {
 // ── Setup a čipy ────────────────────────────────────────────────────────────
 
 test('startGame: 1 člověk + N AI, čipy nastavené, ruce rozdané', () => {
-  const s = startGame({ humanName: 'Ty', numAi: 3, startingChips: 8 })
+  const s = startGame({ humanName: 'Ty', numAi: 3, startingChips: 8, humanTokens: ['freeDraw', 'refund', 'embezzlement'] })
   assert.equal(s.players.length, 4)
   assert.equal(s.players[0].isAi, false)
   assert.ok(s.players.slice(1).every((p) => p.isAi))
@@ -112,6 +123,30 @@ test('startGame: 1 člověk + N AI, čipy nastavené, ruce rozdané', () => {
     assert.equal(p.hand.sand.family, 'sand')
     assert.equal(p.hand.blood.family, 'blood')
   }
+})
+
+test('startGame: úvodní odhoz — 1 otočená karta na každé hromádce z balíčku', () => {
+  const s = startGame({ humanName: 'Ty', numAi: 3, startingChips: 6, humanTokens: ['freeDraw', 'refund', 'embezzlement'] }) // 4 hráči
+  assert.equal(s.discards.sand.length, 1)
+  assert.equal(s.discards.blood.length, 1)
+  assert.equal(s.discards.sand[0].family, 'sand')
+  assert.equal(s.discards.blood[0].family, 'blood')
+  // balíček = 20 − 4 ruce − 1 úvodní odhoz = 15; žádné karty navíc
+  assert.equal(s.decks.sand.length, 20 - 4 - 1)
+  assert.equal(s.decks.blood.length, 20 - 4 - 1)
+})
+
+test('nextRound: nové kolo má taky úvodní odhoz na obou hromádkách', () => {
+  let s = buildState([
+    mkPlayer(0, 3, 3, { chips: 5, invested: 1 }),
+    mkPlayer(1, 5, 4, { chips: 5, invested: 1 }),
+  ])
+  s = stand(s)
+  s = stand(s) // → reveal
+  s = nextRound(s)
+  assert.notEqual(s.phase, 'gameover')
+  assert.equal(s.discards.sand.length, 1)
+  assert.equal(s.discards.blood.length, 1)
 })
 
 test('drawFromSource: zaplatí čip do potu, zvýší invested, nastaví pendingDraw', () => {
@@ -384,16 +419,23 @@ test('previewHandValue: Imposter → neznámá hodnota; Sylop → Sabacc; dva Sy
 
 // ── Pure Sabacc ve vyhodnocení kola ─────────────────────────────────────────
 
-function mkHandPlayer(id: number, sand: Card, blood: Card, opts: { chips?: number; invested?: number } = {}): Player {
+function mkHandPlayer(
+  id: number,
+  sand: Card,
+  blood: Card,
+  opts: { chips?: number; invested?: number; tokens?: TokenId[]; isAi?: boolean } = {},
+): Player {
   return {
     id,
     name: `P${id}`,
-    isAi: false,
+    isAi: opts.isAi ?? false,
     hand: { sand, blood },
     standing: false,
     chips: opts.chips ?? 6,
     invested: opts.invested ?? 0,
     eliminated: false,
+    tokens: opts.tokens ?? [],
+    playedTokenThisRound: false,
   }
 }
 
@@ -507,4 +549,132 @@ test('endRound: Sylop+1 poráží 2/2', () => {
   s = stand(s)
   s = stand(s)
   assert.equal(s.roundWinnerId, 0)
+})
+
+// ── Shift Tokeny (F3b) ───────────────────────────────────────────────────────
+
+test('startGame: člověk dostane své tokeny, každé AI 3 náhodné', () => {
+  const toks: TokenId[] = ['freeDraw', 'refund', 'targetTariff']
+  const s = startGame({ humanName: 'Ty', numAi: 3, startingChips: 6, humanTokens: toks })
+  assert.deepEqual(s.players[0].tokens, toks)
+  assert.ok(s.players.slice(1).every((p) => p.tokens.length === 3))
+  assert.ok(s.players.every((p) => !p.playedTokenThisRound))
+})
+
+test('Refund: vrátí čipy z potu, sníží invested i pot, spotřebuje token', () => {
+  let s = buildState([mkPlayer(0, 5, 2, { chips: 3, invested: 2, tokens: ['refund'] }), mkPlayer(1, 3, 3)])
+  assert.equal(s.pot, 2)
+  s = playToken(s, 'refund')
+  assert.equal(s.players[0].chips, 5) // 3 + 2 zpět
+  assert.equal(s.players[0].invested, 0)
+  assert.equal(s.pot, 0)
+  assert.equal(s.players[0].tokens.includes('refund'), false)
+  assert.equal(s.players[0].playedTokenThisRound, true)
+})
+
+test('Refund: nevrátí víc, než hráč vsadil (cap na invested)', () => {
+  let s = buildState([mkPlayer(0, 5, 2, { chips: 3, invested: 1, tokens: ['refund'] }), mkPlayer(1, 3, 3)])
+  s = playToken(s, 'refund')
+  assert.equal(s.players[0].chips, 4) // jen 1 zpět
+  assert.equal(s.players[0].invested, 0)
+})
+
+test('Refund: nelze bez vlastního vkladu v potu', () => {
+  const s = buildState([mkPlayer(0, 5, 2, { chips: 3, invested: 0, tokens: ['refund'] }), mkPlayer(1, 3, 3)])
+  assert.equal(canPlayToken(s, 'refund'), false)
+  assert.equal(playToken(s, 'refund'), s) // beze změny
+})
+
+test('Embezzlement: vezme 1 čip od každého soupeře s čipy (0 od bezčipého)', () => {
+  let s = buildState([
+    mkPlayer(0, 5, 2, { chips: 5, tokens: ['embezzlement'] }),
+    mkPlayer(1, 3, 3, { chips: 3 }),
+    mkPlayer(2, 3, 3, { chips: 0 }),
+  ])
+  s = playToken(s, 'embezzlement')
+  assert.equal(s.players[0].chips, 6) // +1 (jen od P1)
+  assert.equal(s.players[1].chips, 2)
+  assert.equal(s.players[2].chips, 0)
+})
+
+test('General Tariff: soupeři platí 1 čip do potu (invested++), bezčipý neplatí', () => {
+  let s = buildState([
+    mkPlayer(0, 5, 2, { chips: 5, tokens: ['generalTariff'] }),
+    mkPlayer(1, 3, 3, { chips: 3 }),
+    mkPlayer(2, 3, 3, { chips: 0 }),
+  ])
+  s = playToken(s, 'generalTariff')
+  assert.equal(s.players[1].chips, 2)
+  assert.equal(s.players[1].invested, 1)
+  assert.equal(s.players[2].chips, 0)
+  assert.equal(s.pot, 1)
+})
+
+test('Target Tariff: cíl platí 2 čipy do potu, cap na jeho zásobu', () => {
+  let s = buildState([
+    mkPlayer(0, 5, 2, { chips: 5, tokens: ['targetTariff'] }),
+    mkPlayer(1, 3, 3, { chips: 1 }), // má jen 1 → zaplatí 1
+  ])
+  assert.equal(canPlayToken(s, 'targetTariff', 1), true)
+  s = playToken(s, 'targetTariff', 1)
+  assert.equal(s.players[1].chips, 0)
+  assert.equal(s.pot, 1)
+})
+
+test('max 1 token za kolo: druhý token už nelze', () => {
+  let s = buildState([
+    mkPlayer(0, 5, 2, { chips: 3, invested: 2, tokens: ['refund', 'freeDraw'] }),
+    mkPlayer(1, 3, 3),
+  ])
+  s = playToken(s, 'refund')
+  assert.equal(s.players[0].playedTokenThisRound, true)
+  assert.equal(canPlayToken(s, 'freeDraw'), false)
+  assert.equal(playToken(s, 'freeDraw'), s)
+})
+
+test('Free Draw: další tažení je zdarma a token se spotřebuje', () => {
+  let s = stateWithDecks([mkPlayer(0, 6, 1, { chips: 0, tokens: ['freeDraw'] }), mkPlayer(1, 3, 3)])
+  s = playToken(s, 'freeDraw')
+  assert.equal(s.freeDrawActive, true)
+  assert.equal(canAffordDraw(s), true) // i s 0 čipy
+  s = drawFromSource(s, 'sandDeck')
+  assert.ok(s.pendingDraw)
+  assert.equal(s.players[0].chips, 0) // nic nezaplaceno
+  assert.equal(s.pot, 0)
+  assert.equal(s.freeDrawActive, false) // spotřebováno
+})
+
+test('Free Draw se nepřenese do dalšího tahu, když hráč jen stojí', () => {
+  let s = buildState([mkPlayer(0, 6, 1, { chips: 5, tokens: ['freeDraw'] }), mkPlayer(1, 3, 3)])
+  s = playToken(s, 'freeDraw')
+  assert.equal(s.freeDrawActive, true)
+  s = stand(s) // přejde na dalšího hráče
+  assert.equal(s.freeDrawActive, false)
+})
+
+test('decideAiToken: Free Draw když chce táhnout a má málo čipů', () => {
+  const s = buildState([
+    mkPlayer(0, 6, 1, { isAi: true, chips: 1, tokens: ['freeDraw'] }),
+    mkPlayer(1, 3, 3),
+  ])
+  const move = { action: 'draw', source: 'sandDeck' } as const
+  assert.deepEqual(decideAiToken(s, 0, move, () => 0.1), { token: 'freeDraw' })
+})
+
+test('decideAiToken: nic, když token nevlastní nebo už hrál', () => {
+  const s = buildState([
+    mkPlayer(0, 6, 1, { isAi: true, chips: 1, tokens: ['freeDraw'], playedTokenThisRound: true }),
+    mkPlayer(1, 3, 3),
+  ])
+  assert.equal(decideAiToken(s, 0, { action: 'draw', source: 'sandDeck' }, () => 0.1), null)
+})
+
+test('čipy nikdy do záporu po tokenech (Tariff/Embezzlement)', () => {
+  let s = buildState([
+    mkPlayer(0, 5, 2, { chips: 0, tokens: ['targetTariff'] }),
+    mkPlayer(1, 3, 3, { chips: 0 }),
+  ])
+  s = playToken(s, 'targetTariff', 1)
+  assert.ok(s.players.every((p) => p.chips >= 0))
+  assert.equal(s.pot, 0) // cíl neměl co platit
 })

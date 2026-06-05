@@ -11,7 +11,9 @@ import {
   type Card,
   type DrawSource,
   type GameState,
+  type TokenId,
 } from '../lib/sabacc'
+import { canPlayToken, TOKEN_DEFS } from '../lib/tokens'
 
 /** Lidsky čitelný název karty (vč. speciálních). */
 function cardLabel(card: Card): string {
@@ -26,20 +28,40 @@ interface Props {
   onDrawFromSource: (source: DrawSource) => void
   onResolveDraw: (keepDrawn: boolean) => void
   onStand: () => void
+  onPlayToken: (token: TokenId, targetId?: number) => void
 }
 
-export function TurnScreen({ state, onDrawFromSource, onResolveDraw, onStand }: Props) {
+export function TurnScreen({ state, onDrawFromSource, onResolveDraw, onStand, onPlayToken }: Props) {
   const [choosingSource, setChoosingSource] = useState(false)
+  const [targetingToken, setTargetingToken] = useState<TokenId | null>(null)
   const player = state.players[state.currentPlayerIndex]
   const preview = previewHandValue(player.hand)
   const pending = state.pendingDraw
   const affordable = canAffordDraw(state)
+  const opponents = state.players.filter((p) => p.id !== player.id && !p.eliminated)
 
   const pickSource = (source: DrawSource) => {
     if (!canDrawFrom(state, source)) return
     onDrawFromSource(source)
     setChoosingSource(false)
   }
+
+  const clickToken = (token: TokenId) => {
+    if (token === 'targetTariff') {
+      setTargetingToken('targetTariff')
+    } else {
+      onPlayToken(token)
+    }
+  }
+  const pickTarget = (targetId: number) => {
+    onPlayToken('targetTariff', targetId)
+    setTargetingToken(null)
+  }
+  // Smí hráč teď zahrát daný token? (cíl u Target Tariff = libovolný aktivní soupeř)
+  const tokenPlayable = (token: TokenId) =>
+    token === 'targetTariff'
+      ? opponents.length > 0 && canPlayToken(state, token, opponents[0].id)
+      : canPlayToken(state, token)
 
   return (
     <div className="flex flex-col gap-4 px-4 py-4 max-w-md mx-auto min-h-screen">
@@ -129,8 +151,58 @@ export function TurnScreen({ state, onDrawFromSource, onResolveDraw, onStand }: 
         )}
       </div>
 
+      {/* Shift Tokeny */}
+      {!pending && !choosingSource && player.tokens.length > 0 && (
+        <div className="rounded-2xl bg-slate-900/60 p-3">
+          {targetingToken ? (
+            <>
+              <p className="text-xs text-slate-400 mb-2">Target Tariff — vyber soupeře (zaplatí 2 čipy):</p>
+              <div className="flex flex-wrap gap-2">
+                {opponents.map((o) => (
+                  <button
+                    key={o.id}
+                    onClick={() => pickTarget(o.id)}
+                    className="rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-2 text-sm text-slate-100 border border-slate-700 hover:border-[#2fd4c4]"
+                  >
+                    {o.name} ({o.chips})
+                  </button>
+                ))}
+                <button
+                  onClick={() => setTargetingToken(null)}
+                  className="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm text-slate-200"
+                >
+                  Zrušit
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400 mb-2">
+                Shift Tokeny {player.playedTokenThisRound && '· token už v tomto kole zahrán'}
+              </p>
+              <div className="flex flex-col gap-2">
+                {player.tokens.map((t) => {
+                  const playable = tokenPlayable(t)
+                  return (
+                    <button
+                      key={t}
+                      onClick={() => clickToken(t)}
+                      disabled={!playable}
+                      className="text-left rounded-lg px-3 py-2 border border-[#2fd4c4]/60 bg-[#13a394]/15 hover:bg-[#13a394]/30 text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#13a394]/15"
+                    >
+                      <span className="font-bold text-[#2fd4c4]">{TOKEN_DEFS[t].name}</span>
+                      <span className="block text-xs text-slate-400">{TOKEN_DEFS[t].desc}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Akce */}
-      {!pending && !choosingSource && (
+      {!pending && !choosingSource && !targetingToken && (
         <div className="flex flex-col gap-2">
           <div className="grid grid-cols-2 gap-3">
             <button
@@ -140,7 +212,7 @@ export function TurnScreen({ state, onDrawFromSource, onResolveDraw, onStand }: 
             >
               Táhnout
               <span className="text-[11px] font-medium flex items-center gap-1">
-                <Coins size={11} /> {DRAW_COST} čip
+                <Coins size={11} /> {state.freeDrawActive ? 'zdarma' : `${DRAW_COST} čip`}
               </span>
             </button>
             <button

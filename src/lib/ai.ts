@@ -12,7 +12,9 @@ import {
   type Family,
   type Card,
   type DrawSource,
+  type TokenId,
 } from './sabacc.ts'
+import { canPlayToken, playToken } from './tokens.ts'
 
 export type AiMove = { action: 'stand' } | { action: 'draw'; source: DrawSource }
 
@@ -129,24 +131,83 @@ function appendLog(state: GameState, msg: string): GameState {
 }
 
 /**
- * Provede celý tah aktuálního AI hráče (rozhodnutí + případné tažení a výběr
- * karty) a vrátí nový stav s doplněným logem. Volat jen ve fázi 'aiTurn'.
+ * Rozhodne, zda (a jaký) Shift Token AI zahraje před svou akcí — max 1 za kolo.
+ * Heuristika dle plánovaného tahu a pozice; s drobnou náhodou (rng seedovatelná).
+ * Vrací null, pokud AI token hrát nechce / nemůže.
+ */
+export function decideAiToken(
+  state: GameState,
+  playerId: number,
+  intendedMove: AiMove,
+  rng: () => number = Math.random,
+): { token: TokenId; targetId?: number } | null {
+  const me = state.players.find((p) => p.id === playerId)!
+  if (me.playedTokenThisRound || me.tokens.length === 0) return null
+
+  const owns = (t: TokenId) => me.tokens.includes(t)
+  const est = estimateHand(me.hand)
+  const goodHand = est <= 1
+  const weakHand = est >= 3
+  const oppWithChips = state.players.filter((p) => p.id !== me.id && !p.eliminated && p.chips > 0)
+
+  // Free Draw: chystá se táhnout a má málo čipů → ušetři čip.
+  if (owns('freeDraw') && intendedMove.action === 'draw' && me.chips <= 2 && canPlayToken(state, 'freeDraw') && rng() < 0.85) {
+    return { token: 'freeDraw' }
+  }
+
+  // Refund / Extra Refund: slabší ruka a dost vsazeno → pojisti si čipy.
+  if (owns('extraRefund') && me.invested >= 3 && weakHand && canPlayToken(state, 'extraRefund') && rng() < 0.6) {
+    return { token: 'extraRefund' }
+  }
+  if (owns('refund') && me.invested >= 2 && weakHand && canPlayToken(state, 'refund') && rng() < 0.6) {
+    return { token: 'refund' }
+  }
+
+  // Target Tariff: dobrá-ish ruka → přitlač. Cíl: lídr-člověk, jinak nejslabší.
+  if (owns('targetTariff') && oppWithChips.length > 0 && est <= 2 && rng() < 0.5) {
+    const leader = oppWithChips.reduce((a, b) => (b.chips > a.chips ? b : a))
+    const weakest = oppWithChips.reduce((a, b) => (b.chips < a.chips ? b : a))
+    const human = oppWithChips.find((o) => !o.isAi)
+    const target = human && human.id === leader.id ? human : weakest
+    if (canPlayToken(state, 'targetTariff', target.id)) return { token: 'targetTariff', targetId: target.id }
+  }
+
+  // Embezzlement / General Tariff: dobrá ruka → tlač soupeře k vyřazení.
+  if (owns('embezzlement') && oppWithChips.length > 0 && goodHand && canPlayToken(state, 'embezzlement') && rng() < 0.5) {
+    return { token: 'embezzlement' }
+  }
+  if (owns('generalTariff') && oppWithChips.length > 0 && goodHand && canPlayToken(state, 'generalTariff') && rng() < 0.4) {
+    return { token: 'generalTariff' }
+  }
+
+  return null
+}
+
+/**
+ * Provede celý tah aktuálního AI hráče: případně zahraje token, pak rozhodne
+ * a provede Táhnout/Stát. Vrací nový stav s doplněným logem. Jen ve fázi 'aiTurn'.
  */
 export function applyAiTurn(state: GameState, rng: () => number = Math.random): GameState {
   if (state.phase !== 'aiTurn') return state
   const player = state.players[state.currentPlayerIndex]
-  const move = decideAiMove(state, player.id, rng)
+
+  // Nejdřív (volitelně) token — podle plánovaného tahu.
+  const intended = decideAiMove(state, player.id, rng)
+  const tokenPlay = decideAiToken(state, player.id, intended, rng)
+  let s = tokenPlay ? playToken(state, tokenPlay.token, tokenPlay.targetId) : state
+
+  // Pak normální akce na (případně upraveném) stavu.
+  const cur = s.players[s.currentPlayerIndex]
+  const move = decideAiMove(s, cur.id, rng)
 
   if (move.action === 'stand') {
-    return appendLog(stand(state), `${player.name} stojí.`)
+    return appendLog(stand(s), `${cur.name} stojí.`)
   }
-
-  const afterDraw = drawFromSource(state, move.source)
-  // Kdyby se z nějakého důvodu nepovedlo táhnout, raději postav.
+  const afterDraw = drawFromSource(s, move.source)
   if (!afterDraw.pendingDraw) {
-    return appendLog(stand(state), `${player.name} stojí.`)
+    return appendLog(stand(s), `${cur.name} stojí.`)
   }
-  const keep = decideAiKeep(player.hand, afterDraw.pendingDraw)
+  const keep = decideAiKeep(cur.hand, afterDraw.pendingDraw)
   const resolved = resolveDraw(afterDraw, keep)
-  return appendLog(resolved, `${player.name} táhl ${sourceLabel(move.source)}.`)
+  return appendLog(resolved, `${cur.name} táhl ${sourceLabel(move.source)}.`)
 }

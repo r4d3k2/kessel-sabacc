@@ -12,6 +12,9 @@ dist-ssr
 # TypeScript build cache
 *.tsbuildinfo
 
+# Lokální (per-stroj) nastavení Claude Code
+.claude/settings.local.json
+
 # Editor
 .vscode/*
 !.vscode/extensions.json

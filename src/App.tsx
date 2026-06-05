@@ -10,8 +10,10 @@ import {
   type GameState,
   type GameConfig,
   type DrawSource,
+  type TokenId,
 } from './lib/sabacc'
 import { applyAiTurn } from './lib/ai'
+import { playToken } from './lib/tokens'
 import { SetupScreen } from './components/SetupScreen'
 import { TurnScreen } from './components/TurnScreen'
 import { AiTurnScreen } from './components/AiTurnScreen'
@@ -23,6 +25,7 @@ type Action =
   | { type: 'DRAW_FROM_SOURCE'; source: DrawSource }
   | { type: 'RESOLVE_DRAW'; keepDrawn: boolean }
   | { type: 'STAND' }
+  | { type: 'PLAY_TOKEN'; token: TokenId; targetId?: number }
   | { type: 'AI_MOVE' }
   | { type: 'NEXT_ROUND' }
   | { type: 'NEW_GAME' }
@@ -37,6 +40,8 @@ function reducer(state: GameState, action: Action): GameState {
       return resolveDraw(state, action.keepDrawn)
     case 'STAND':
       return stand(state)
+    case 'PLAY_TOKEN':
+      return playToken(state, action.token, action.targetId)
     case 'AI_MOVE':
       return applyAiTurn(state)
     case 'NEXT_ROUND':
@@ -79,6 +84,7 @@ export default function App() {
             onDrawFromSource={(source) => dispatch({ type: 'DRAW_FROM_SOURCE', source })}
             onResolveDraw={(keepDrawn) => dispatch({ type: 'RESOLVE_DRAW', keepDrawn })}
             onStand={() => dispatch({ type: 'STAND' })}
+            onPlayToken={(token, targetId) => dispatch({ type: 'PLAY_TOKEN', token, targetId })}
           />
         )}
 
